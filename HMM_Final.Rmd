@@ -1,0 +1,560 @@
+---
+title: "HMM_Project"
+author: "D_M"
+date: "24/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Title:  Hidden Markov Models (HMM)
+# File:   DMR_06_04_HMM.R
+# Course: Data Mining with R
+
+# 1. Introduction
+
+    The Hidden Markov Model (HMM) provides a framework for modeling events and occurrences and amounts that follow some pattern. The HMM fits a model to observed records by introducing a small number of discrete states. These states allow a diagnostic interpretation of observed variability in terms of a few patterns. They are not directly observable, or 'hidden' from the observer.
+
+    The time sequence of which state is active on each day follows a Markov chain. Thus, the state which is active 'today' depends only on the state which was active 'yesterday' according to transition probabilities.
+
+# 2.Choosing the Model
+ 
+ **a. Model Types There are 4 model types under the Model menu:**
+
+  > I.  HMM - Hidden Markov Model
+        Model with first-order Markovian time dependence
+
+  > II. NHMM - Nonhomogeneous Hidden Markov Model
+        HMM with predictors, sometimes called 'inputs.' These inputs consist of one or more daily real-valued  timeseries. A logistic regression is used to model model the dependence of state-probability on the inputs.
+
+  > III. MIXTURE - Mixture model
+         Model without explicit time dependence. This is the same as the HMM, but without the modeled Markov time dependence.
+
+  > IV. NMIXTURE - Nonhomogeneous Mixture model
+        Model MIXTURE with predictors.
+
+For our dataset on Temperature we chose the NHMM mode.
+
+
+# 3.Making a Preliminary Analysis
+
+We then follow three consecutive steps in defining our model as given below:
+
+1. Estimate the model parameters (learn), 
+
+At this step, 5 components need to be defined to run our HMM model:
+
+ - Hidden states
+
+ - Set of observations
+
+ - Transition matrix
+
+ - Emissions Matrix
+
+ - Initial Probability Distribution
+
+
+2. Estimate the most-likely state sequence (viterbi), and 
+
+
+3. Thirdly generate temperature simulations (simulate).
+
+# 4.Choosing the Number of States
+
+The most appropriate number of hidden states (k) is a subjective choice based on the goal of the analysis. It can be guided by the BIC (Bayes Information Criterion, a penalized likelihood measure) values obtained with different choices of k, found in the 'learn'.out files. A graph of the BIC vs. k (for k = 2 .. 15, say) will generally increase with k to a certain point, before reaching a maximum or a plateau. The smallest k for which the BIC no longer increases appreciably makes a reasonable choice. 
+
+
+# 5. Introducing Predictors
+
+The NHMM and NMIXTURE model types require an additional predictor input file on the Main Frame, that specifies the timeseries of a set of predictors. For the learn and Viterbi actions, this file needs to have the same number of rows (number of sequences x sequence-length) as the rainfall data. Each whitespace-delimited column of the file should contain a separate predictor, with the number of columns matching the number of predictors specified in the main panel.
+For the simulation action, the number of rows in the predictor input file must match the desired length of the simulations.
+
+The output files from the Viterbi and simulation actions with predictors have the same form as for models without predictors. However, note that the learn action with predictors produces an output file of a sightly different form, because there is no simple transition matrix in this case. A transition matrix can be reconstructed from the Viterbi sequence.
+
+# INSTALL AND LOAD PACKAGES ################################
+
+# Install pacman if you don't have it (uncomment next line)
+# install.packages("pacman")
+
+# Install and/or load packages with pacman
+
+```{r}
+pacman::p_load(  # Use p_load function from pacman
+  datasets,      # R's built-in sample datasets
+  depmixS4,      # 
+  magrittr,      # Pipes
+  pacman,        # Load/unload packages
+  rio,           # Import/export data
+  dplyr,
+  tidyverse,     # So many reasons
+  quantmod,      # For technical analysis and working with time series
+  HMM
+)
+```
+
+
+```{r}
+library(depmixS4)
+```
+
+
+```{r}
+# install.packages("depmixS4")
+# install.packages("HiddenMarkov")
+```
+
+
+# SET RANDOM SEED ##########################################
+
+# Set random seed for reproducibility in processes like
+# sampling and splitting the data
+
+```{r}
+set.seed(1)  # You can use any number here
+```
+
+
+
+# LOAD AND PREPARE DATA ####################################
+```{r}
+setwd("E:\\UPWORK-2020\\Sequence_Mining_Proj\\")
+```
+
+# We'll use the Weather dataset from UCI Dataset
+```{r}
+mydata <- read.csv("mod_temperature_data.csv", header =T, sep = ",", row.names = 1, stringsAsFactors = FALSE)
+
+mydata$Date <- as.Date(format(as.Date(mydata$Date, "%Y-%m-%d"), "%m/%d/%Y"), format = "%m/%d/%Y")
+head(mydata)
+```
+
+
+```{r}
+str(mydata)
+```
+
+```{r}
+summary(mydata)
+```
+
+## Sample Data
+
+```{r}
+# Take random subsample to save time (if needed)
+sample_df <- mydata %<>% sample_n(1000)
+```
+
+
+```{r}
+plot(sample_df$Solar.radiation)
+abline(h = c(4650, 5650), col = "red")
+```
+
+
+# Step 1: Define States
+
+**specify discretization for the Present_Tmax columns and don't discretize the others**
+
+```{r}
+library("arules")
+
+clean_Disc <- discretizeDF(mydata, methods = list(
+  Present_Tmax = list(method = "frequency", breaks = 3, 
+    labels = c("Cold", "Medium_temp", "Hot")),
+  Solar.radiation = list(method = "frequency", breaks = 3, 
+    labels = c("Low&Cloudy", "Medium", "High&Sunny"))
+  ),
+  default = list(method = "none")
+  )
+head(clean_Disc)
+```
+
+
+```{r}
+#define state: 
+S <- c('Low','Medium', 'High')
+```
+
+
+
+# Step 2: Define Observations
+
+## Selecting only relevant columns
+
+```{r}
+select_data <- clean_Disc[,!names(clean_Disc)%in%c("Present_Tmin","lat","lon", "DEM", "Slope", "Next_Tmax", "Next_Tmin")]
+
+head(select_data)
+```
+
+# Transition Probability Matrix
+
+```{r}
+select_data$Solar.radiation[1:10]
+```
+
+### Transition Matrix
+```{r, message=FALSE,warning=FALSE}
+library("markovchain")
+
+simple_A <- markovchainFit(select_data$Solar.radiation[1:10])
+simple_A$estimate
+```
+
+### Repeat for all States
+```{r}
+#find transition matrix using markovchain library
+transition <- markovchainFit(data=select_data$Present_Tmax)
+transition$estimate
+```
+
+## Transition Matrix
+
+```{r}
+A <- rbind(c(transition$estimate[1]), (transition$estimate[2]), (transition$estimate[3]))
+
+#check rows sum to 1
+apply(A, 1, sum)
+```
+
+
+# Sequence of Observations
+
+```{r}
+#H: High - L: Low - M: Moderate (alphabetical order)
+V_labels <- c('L', 'M','H') 
+  
+V <- select_data$Solar.radiation
+```
+
+
+
+# Emission Probability Matrix
+
+```{r}
+#Emissions probabilities
+#contingency table
+e_table <- table(select_data$Present_Tmax, select_data$Solar.radiation)
+e_table
+```
+
+## Emission Probabilities
+
+```{r}
+#probabilities
+cold <- e_table[1,]/sum(e_table[1,])
+medium_temp <- e_table[2,]/sum(e_table[2,])
+hot <- e_table[3,]/sum(e_table[3,])
+
+#make sure order is same as S vector above
+B <- rbind(cold, medium_temp, hot)
+B
+```
+
+
+# Initial Probability Distribution
+
+```{r}
+table(select_data$Present_Tmax)/length(select_data$Present_Tmax)
+```
+## Start Probabilities
+
+```{r}
+pi <- rbind(c(.26, .14, .6))
+#pi <- rbind(c(1,0,0))
+```
+
+
+# SPLIT DATA ###############################################
+
+
+# Run HMM Model
+
+```{r, message=FALSE,warning=FALSE}
+library(HMM)
+# Initialise HMM
+hmm = initHMM(S, V_labels, startProbs = pi, transProbs = A, emissionProbs = B)
+print(hmm)
+```
+```{r}
+# Initialise HMM
+# hmm = initHMM(States = states, Symbols = symbols, startProbs = startProbs, transProbs = transProbs, emissionProbs = emissionProbs)
+
+# observations = c("H", "H", "G", "G", "G", "H")
+```
+
+```{r}
+head(select_data$Solar.radiation)
+```
+
+
+```{r}
+observations = select_data$Solar.radiation[1:10]
+```
+
+
+```{r}
+# head(exp(forward(hmm,observations)))
+```
+
+
+```{r}
+viterbi = viterbi(hmm,observations)
+print(viterbi)
+```
+
+
+# Evaluation Problem
+
+```{r}
+select_data$Solar.radiation[1:3]
+```
+
+
+```{r}
+select_data$Present_Tmax[1:3]
+```
+
+
+## Forward Algorithm
+
+```{r}
+#take first 5 observations
+V_sample <- c("M", "M", "M")
+ 
+forward = function(v, a, b, initial_distribution){
+  
+  T = length(v)
+  m = nrow(a)
+  alpha = matrix(0, T, m)
+  
+  alpha[1, ] = initial_distribution*b[, v[1]]
+  
+  for(t in 2:T){
+    tmp = alpha[t-1, ] %*% a
+    alpha[t, ] = tmp * b[, v[t]]
+  }
+  return(alpha)
+}
+ 
+answer <- forward(V_sample,A,B,pi)
+answer
+```
+
+
+```{r}
+sum(answer[3,])
+```
+
+
+```{r}
+library(gtools)
+```
+
+
+```{r}
+#all possible sequences
+test <- permutations(3,3,V_labels, repeats = TRUE)
+
+total <- 0
+
+for (i in 1:27){ 
+  x <- (test[i,])
+  print(sum(forward(x,A,B,pi)[3,]))
+  total <- total + sum(forward(x,A,B,pi)[3,])
+}
+```
+
+```{r}
+total
+```
+
+```{r}
+test[24,]
+```
+
+
+
+# Backward Algorithm
+
+```{r}
+#backward
+backward = function(V, A, B){
+  T = length(V)
+  m = nrow(A)
+  beta = matrix(1, T, m)
+  
+  for(t in (T-1):1){
+    tmp = as.matrix(beta[t+1, ] * B[, V[t+1]])
+    beta[t, ] = t(A %*% tmp)
+  }
+  return(beta)
+}
+
+backward(V_sample,A,B)
+```
+
+# Decoding Problem
+Finding the most probable path given our set of observations? The decoding problem finds the most probable hidden state at each time step. 
+
+# Viterbi
+Using the viterbi algorithm, find the most likely states based on A and B estimates from observed data. 
+
+```{r}
+#HMM most likely states
+HMM_states <- viterbi(hmm, V)
+
+#compare model to actual
+cbind(HMM_states, select_data$Present_Tmax)[1:15]
+```
+
+
+```{r}
+#how'd we do? % of states correct
+sum(HMM_states == select_data$Present_Tmax)/length(select_data$Present_Tmax)
+```
+
+```{r}
+plot(HMM_states == select_data$Present_Tmax)
+```
+
+
+
+*******************************************************************************************
+
+
+# Using The DepmixS4 
+
+
+# Plot the data
+
+```{r}
+plot(ts(select_data[, 1:3]), main = "Temperature data")
+```
+
+
+```{r}
+sp1 <- data.frame(select_data[1:50,])
+names(sp1) <- c("RT", "ACC","Pacc")
+```
+
+
+```{r}
+sp1
+```
+
+
+
+```{r}
+#mod <- depmix(rt~1, data=select_data, nstates=2, trstart=runif(4))
+```
+
+
+```{r}
+# create a 3 state model with one continuous and two binary response
+mod <- depmix(list(rt~1,corr~1),
+              data=select_data, 
+              nstates=3,
+              family=list(gaussian(),multinomial()))
+# print the model, formulae and parameter values (ie the starting values)
+mod
+```
+
+
+
+```{r}
+m1 <- mix(RT~1,nstates=1, data=sp1)
+fm1 <- fit(m1)
+bic1 <- BIC(fm1)
+```
+
+```{r}
+set.seed(1)
+m2 <- mix(RT~1,nstates=2, data=sp1,
+          respstart=c(rnorm(1,5),1,rnorm(1,6),1))
+fm2 <- fit(m2,emcontrol=em.control(rand=F))
+bic2 <- BIC(fm2)
+```
+
+```{r} 
+m1p <- depmix(list(ACC~Pacc,RT~Pacc), nstates=1,
+              data=sp1, family=list(multinomial(),gaussian()))
+fm1p <- fit(m1p)
+```
+
+
+
+
+# MODEL EXPLANATION ##########################################################
+
+
+
+# COMPARE MODELS ###########################################
+
+# Want lowest BIC (Bayesian Information Criterion)
+
+```{r}
+plot(1:3, 
+  c(BIC(fm1), BIC(fm2), BIC(fm3)),
+  ty = "b", 
+  xlab = "Model", 
+  ylab = "BIC"
+)
+```
+
+
+
+```{r}
+summary(fm1)
+```
+
+
+
+# CLEAN UP #################################################
+
+# Clear data
+```{r}
+rm(list = ls())  # Removes all objects from the environment
+```
+
+
+# Clear packages
+```{r}
+detach("package:datasets", unload = T)  # For base packages
+p_unload(all)  # Remove all contributed packages
+```
+
+
+# Clear plots
+```{r}
+graphics.off()  # Clears plots, closes all graphics devices
+```
+
+
+# Clear console
+```{r}
+cat("\014")  # Mimics ctrl+L
+```
+
+# Clear R
+#   You may want to use Session > Restart R, as well, which 
+#   resets changed options, relative paths, dependencies, 
+#   and so on to let you start with a clean slate
+
+# Clear mind :)
+
+
+
+
+
+
+
+
+
+
+
+
+
